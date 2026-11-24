@@ -316,14 +316,60 @@ TEST(Translate, AddRegisterShift) {
 
 TEST(Translate, Ldp) {
     sr::common::u8 code[4];
-    WordToBytes(0xE8400440u, code); // LDP x0, x1, [x2]
-    ExpectFirstInstr(code, 4u, Opcode::Add, 2u);
+    WordToBytes(0xE8400440u, code); // LDP x0, x1, [x2], #0 (post-index)
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs.size(), 2u); // pair load + writeback
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::LoadPairMem);
+    ASSERT_EQ(instrs[0]->operands().size(), 6u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[0])->value(), 0u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[1])->value(), 1u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[2])->value(), 2u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[4])->value(), 8u);
+    EXPECT_EQ(instrs[1]->opcode(), Opcode::Add); // Rn writeback
+}
+
+TEST(Translate, LdpOffsetFormHasNoWriteback) {
+    sr::common::u8 code[4];
+    WordToBytes(0xA9410440u, code); // LDP x0, x1, [x2, #16]
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs.size(), 1u);
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::LoadPairMem);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[3])->value(), 16u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[5])->value(), 0u);
+}
+
+TEST(Translate, LdpWordFormUses32BitAccess) {
+    sr::common::u8 code[4];
+    WordToBytes(0x29400440u, code); // LDP w0, w1, [x2]
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::LoadPairMem);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[4])->value(), 4u);
+}
+
+TEST(Translate, LdpswSignExtends) {
+    sr::common::u8 code[4];
+    WordToBytes(0x69400440u, code); // LDPSW x0, x1, [x2]
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::LoadPairMem);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[4])->value(), 4u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[5])->value(), 1u);
 }
 
 TEST(Translate, Stp) {
     sr::common::u8 code[4];
-    WordToBytes(0xE8000440u, code); // STP x0, x1, [x2]
-    ExpectFirstInstr(code, 4u, Opcode::Add, 2u);
+    WordToBytes(0xE8000440u, code); // STP x0, x1, [x2], #0 (post-index)
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs.size(), 2u);
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::StorePairMem);
+    ASSERT_EQ(instrs[0]->operands().size(), 5u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[0])->value(), 0u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[1])->value(), 1u);
+    EXPECT_EQ(instrs[1]->opcode(), Opcode::Add);
 }
 
 TEST(Translate, Madd) {
@@ -391,13 +437,26 @@ TEST(Translate, FmovRegS) {
 TEST(Translate, LdrS) {
     sr::common::u8 code[4];
     WordToBytes(0xBD400020u, code); // LDR s0, [x1]
-    ExpectOneInstr(code, Opcode::Load, 1u);
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs.size(), 1u);
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::LoadMem);
+    ASSERT_EQ(instrs[0]->operands().size(), 6u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[0])->value(), 0u); // Vt
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[1])->value(), 1u); // Rn
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[3])->value(), 4u); // width
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[5])->value(), 1u); // FP
 }
 
 TEST(Translate, StrS) {
     sr::common::u8 code[4];
     WordToBytes(0xBD000020u, code); // STR s0, [x1]
-    ExpectOneInstr(code, Opcode::Store, 2u);
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::StoreMem);
+    ASSERT_EQ(instrs[0]->operands().size(), 5u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[3])->value(), 4u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[4])->value(), 1u);
 }
 
 // Verify FP arithmetic operands carry F32 types and the right register indices.
@@ -564,13 +623,21 @@ TEST(Translate, SCvtfDFrom64) {
 TEST(Translate, LdrD) {
     sr::common::u8 code[4];
     WordToBytes(0xFD400020u, code); // LDR d0, [x1]
-    ExpectOneInstr(code, Opcode::Load, 1u);
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::LoadMem);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[3])->value(), 8u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[5])->value(), 1u);
 }
 
 TEST(Translate, StrD) {
     sr::common::u8 code[4];
     WordToBytes(0xFD000020u, code); // STR d0, [x1]
-    ExpectOneInstr(code, Opcode::Store, 2u);
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs[0]->opcode(), Opcode::StoreMem);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[3])->value(), 8u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[4])->value(), 1u);
 }
 
 // Verify F64 arithmetic operands carry F64 types and the right indices.

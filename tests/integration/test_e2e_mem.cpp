@@ -177,6 +177,47 @@ TEST(E2EMem, StrThenLdrAtScaledOffset) {
                                              << output;
 }
 
+TEST(E2EMem, StpThenLdp) {
+    if (!HasGxx()) {
+        GTEST_SKIP() << "g++ not available on PATH; skipping e2e compile test";
+    }
+
+    // stp x2,x3,[x1] then ldp x0,x4,[x1]: the pair round trip must reach x0.
+    const uint8_t code[] = {
+        0x01, 0x02, 0xA0, 0xD2,  // movz x1,#0x10,lsl#16  0xD2A00201
+        0x22, 0x02, 0x80, 0x52,  // movz w2,#0x11         0x52800222
+        0x22, 0x0C, 0x00, 0xA9,  // stp x2,x3,[x1]        0xA9000C22
+        0x20, 0x10, 0x40, 0xA9,  // ldp x0,x4,[x1]        0xA9401020
+        0xC0, 0x03, 0x5F, 0xD6,  // ret                   0xD65F03C0
+    };
+
+    const std::string output = BuildRun(code, sizeof(code), "e2e_mem_pair");
+    ASSERT_FALSE(output.empty()) << "build/run pipeline produced no output";
+    EXPECT_TRUE(ExpectResult(output, 17)) << "expected 'result = 17', got:\n"
+                                         << output;
+}
+
+TEST(E2EMem, StrSLdrSRoundTrip) {
+    if (!HasGxx()) {
+        GTEST_SKIP() << "g++ not available on PATH; skipping e2e compile test";
+    }
+
+    // s0 = 2.0, str s0,[x1], ldr s1,[x1], fcvtzs x0,s1 -> x0 = 2.
+    const uint8_t code[] = {
+        0x01, 0x02, 0xA0, 0xD2,  // movz x1,#0x10,lsl#16  0xD2A00201
+        0x00, 0x10, 0x20, 0x1E,  // fmov s0,#2.0          0x1E201000
+        0x20, 0x00, 0x00, 0xBD,  // str s0,[x1]           0xBD000020
+        0x21, 0x00, 0x40, 0xBD,  // ldr s1,[x1]           0xBD400021
+        0x20, 0x00, 0x78, 0x9E,  // fcvtzs x0,s1          0x9E780020
+        0xC0, 0x03, 0x5F, 0xD6,  // ret                   0xD65F03C0
+    };
+
+    const std::string output = BuildRun(code, sizeof(code), "e2e_mem_fp");
+    ASSERT_FALSE(output.empty()) << "build/run pipeline produced no output";
+    EXPECT_TRUE(ExpectResult(output, 2)) << "expected 'result = 2', got:\n"
+                                        << output;
+}
+
 TEST(E2EMem, LdrsbSignExtends) {
     if (!HasGxx()) {
         GTEST_SKIP() << "g++ not available on PATH; skipping e2e compile test";

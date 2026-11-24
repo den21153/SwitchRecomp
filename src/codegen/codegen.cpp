@@ -697,13 +697,33 @@ void LowerInstruction(const ir::Instruction* i, std::string& out) {
             // sign mode: 0 = zero-extend, 1 = sign-extend to 64 bits,
             //            2 = sign-extend to 32 bits, then zero-extend.
             const auto& lm = i->operands();
-            u64 dst = 0, base = 0, off = 0, width = 8, sign = 0;
-            if (lm.size() == 5) {
+            u64 dst = 0, base = 0, off = 0, width = 8, sign = 0, fp = 0;
+            if (lm.size() >= 5) {
                 if (auto* c = dynamic_cast<const ir::Constant*>(lm[0])) dst = c->value();
                 if (auto* c = dynamic_cast<const ir::Constant*>(lm[1])) base = c->value();
                 if (auto* c = dynamic_cast<const ir::Constant*>(lm[2])) off = c->value();
                 if (auto* c = dynamic_cast<const ir::Constant*>(lm[3])) width = c->value();
                 if (auto* c = dynamic_cast<const ir::Constant*>(lm[4])) sign = c->value();
+            }
+            if (lm.size() >= 6) {
+                if (auto* c = dynamic_cast<const ir::Constant*>(lm[5])) fp = c->value();
+            }
+            if (fp) {
+                // Scalar LDR S/D: the destination is a V register, not an X one.
+                out.append("sr_v_set_");
+                out.append(width == 8 ? "d" : "s");
+                out.append("(&ctx->v[");
+                AppendDec(out, dst);
+                out.append("], *(const ");
+                out.append(width == 8 ? "double" : "float");
+                out.append("*)sr_rt_guest_to_host(ctx, ctx->x[");
+                AppendDec(out, base);
+                out.append("] + ");
+                AppendDec(out, off);
+                out.append("ull, ");
+                AppendDec(out, width);
+                out.append(", 0));");
+                return;
             }
             const char* cty = width == 1 ? (sign ? "int8_t" : "uint8_t")
                             : width == 2 ? (sign ? "int16_t" : "uint16_t")
@@ -728,12 +748,35 @@ void LowerInstruction(const ir::Instruction* i, std::string& out) {
         case Opcode::StoreMem: {
             // STR/STRB/STRH form: operands {Rt, Rn, offset, width}.
             const auto& sm = i->operands();
-            u64 src = 0, base = 0, off = 0, width = 8;
-            if (sm.size() == 4) {
+            u64 src = 0, base = 0, off = 0, width = 8, fp = 0;
+            if (sm.size() >= 4) {
                 if (auto* c = dynamic_cast<const ir::Constant*>(sm[0])) src = c->value();
                 if (auto* c = dynamic_cast<const ir::Constant*>(sm[1])) base = c->value();
                 if (auto* c = dynamic_cast<const ir::Constant*>(sm[2])) off = c->value();
                 if (auto* c = dynamic_cast<const ir::Constant*>(sm[3])) width = c->value();
+            }
+            if (sm.size() >= 5) {
+                if (auto* c = dynamic_cast<const ir::Constant*>(sm[4])) fp = c->value();
+            }
+            if (fp) {
+                const bool dbl = width == 8;
+                const char* fty = dbl ? "double" : "float";
+                out.append("*( ");
+                out.append(fty);
+                out.append("*)sr_rt_guest_to_host(ctx, ctx->x[");
+                AppendDec(out, base);
+                out.append("] + ");
+                AppendDec(out, off);
+                out.append("ull, ");
+                AppendDec(out, width);
+                out.append(", 1) = (");
+                out.append(fty);
+                out.append(")sr_v_get_");
+                out.append(dbl ? "d" : "s");
+                out.append("(&ctx->v[");
+                AppendDec(out, src);
+                out.append("]);");
+                return;
             }
             const char* sty = width == 1 ? "uint8_t"
                             : width == 2 ? "uint16_t"
@@ -752,6 +795,64 @@ void LowerInstruction(const ir::Instruction* i, std::string& out) {
             out.append(")ctx->x[");
             AppendDec(out, src);
             out.append("];");
+            return;
+        }
+        case Opcode::LoadPairMem: {
+            // LDP / LDPSW: operands {Rt, Rt2, Rn, offset, width, sign}.
+            const auto& lp = i->operands();
+            u64 rt = 0, rt2 = 0, base = 0, off = 0, width = 8, sign = 0;
+            if (lp.size() == 6) {
+                if (auto* c = dynamic_cast<const ir::Constant*>(lp[0])) rt = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(lp[1])) rt2 = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(lp[2])) base = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(lp[3])) off = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(lp[4])) width = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(lp[5])) sign = c->value();
+            }
+            const char* lty = width == 4 ? (sign ? "int32_t" : "uint32_t")
+                                        : "uint64_t";
+            for (int k = 0; k < 2; ++k) {
+                out.append("ctx->x[");
+                AppendDec(out, k == 0 ? rt : rt2);
+                out.append("] = (uint64_t)*(const ");
+                out.append(lty);
+                out.append("*)sr_rt_guest_to_host(ctx, ctx->x[");
+                AppendDec(out, base);
+                out.append("] + ");
+                AppendDec(out, off + static_cast<u64>(k) * width);
+                out.append("ull, ");
+                AppendDec(out, width);
+                out.append(", 0); ");
+            }
+            return;
+        }
+        case Opcode::StorePairMem: {
+            // STP: operands {Rt, Rt2, Rn, offset, width}.
+            const auto& sp = i->operands();
+            u64 rt = 0, rt2 = 0, base = 0, off = 0, width = 8;
+            if (sp.size() == 5) {
+                if (auto* c = dynamic_cast<const ir::Constant*>(sp[0])) rt = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(sp[1])) rt2 = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(sp[2])) base = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(sp[3])) off = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(sp[4])) width = c->value();
+            }
+            const char* sty = width == 4 ? "uint32_t" : "uint64_t";
+            for (int k = 0; k < 2; ++k) {
+                out.append("*( ");
+                out.append(sty);
+                out.append("*)sr_rt_guest_to_host(ctx, ctx->x[");
+                AppendDec(out, base);
+                out.append("] + ");
+                AppendDec(out, off + static_cast<u64>(k) * width);
+                out.append("ull, ");
+                AppendDec(out, width);
+                out.append(", 1) = (");
+                out.append(sty);
+                out.append(")ctx->x[");
+                AppendDec(out, k == 0 ? rt : rt2);
+                out.append("]; ");
+            }
             return;
         }
         case Opcode::Branch: {

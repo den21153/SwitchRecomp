@@ -417,41 +417,55 @@ bool DecodeAdrp(u32 word, u64 guest_addr, ConstantCache& cache, BasicBlock* bb) 
     return true;
 }
 
-bool DecodeLdp(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock* bb) {
-    // LDP Xt, Xt2, [Xn, #imm]: load two 64-bit registers from base+offset.
-    u32 imm7 = ExtractBits(word, 21, 15);
-    u32 rn = ExtractBits(word, 9, 5);
-    s64 offset = static_cast<s64>(SignExtend(imm7, 7)) * 8;
-    Value* base = cache.Reg(rn);
-    Instruction* addr1 = cache.builder->CreateAdd(base,
-        cache.builder->CreateConstant(static_cast<u64>(offset), Type::U64()));
-    bb->Append(addr1);
-    bb->Append(cache.builder->CreateLoad(addr1, Type::U64()));
-    Instruction* addr2 = cache.builder->CreateAdd(base,
-        cache.builder->CreateConstant(static_cast<u64>(offset) + 8u, Type::U64()));
-    bb->Append(addr2);
-    bb->Append(cache.builder->CreateLoad(addr2, Type::U64()));
-    return true;
-}
-
-bool DecodeStp(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock* bb) {
-    // STP Xt, Xt2, [Xn, #imm]: store two 64-bit registers to base+offset.
+// LDP/STP (load/store pair) and LDPSW. The previous decoders built the address
+// with Add, which writes into the register named by operand 0 - the base
+// register - and then loaded through Load, whose destination is RegIndex(op0);
+// for a computed address that is 0. So LDP clobbered Rn and loaded both words
+// into x0.
+//
+// opc (bits 31:30): 00 = 32-bit pair, 01 = LDPSW (sign-extended words),
+// 10/11 = 64-bit pair. mode (bits 24:23): 0 = post-index, 2 = offset,
+// 3 = pre-index; the post and pre forms write the adjusted address back to Rn.
+bool DecodePair(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock* bb) {
+    u32 opc = ExtractBits(word, 31, 30);
+    u32 mode = ExtractBits(word, 24, 23);
+    u32 is_load = ExtractBits(word, 22, 22);
     u32 imm7 = ExtractBits(word, 21, 15);
     u32 rt2 = ExtractBits(word, 14, 10);
     u32 rn = ExtractBits(word, 9, 5);
     u32 rt = ExtractBits(word, 4, 0);
-    s64 offset = static_cast<s64>(SignExtend(imm7, 7)) * 8;
-    Value* base = cache.Reg(rn);
-    Instruction* addr1 = cache.builder->CreateAdd(base,
-        cache.builder->CreateConstant(static_cast<u64>(offset), Type::U64()));
-    bb->Append(addr1);
-    bb->Append(cache.builder->CreateStore(addr1, cache.Reg(rt)));
-    Instruction* addr2 = cache.builder->CreateAdd(base,
-        cache.builder->CreateConstant(static_cast<u64>(offset) + 8u, Type::U64()));
-    bb->Append(addr2);
-    bb->Append(cache.builder->CreateStore(addr2, cache.Reg(rt2)));
+
+    u64 width = (opc >= 2) ? 8u : 4u;
+    s64 imm = static_cast<s64>(SignExtend(imm7, 7)) *
+              static_cast<s64>(width);
+    // Post-index addresses from the unmodified base; offset and pre-index use
+    // the adjusted one. Only the offset form skips the Rn writeback.
+    u64 ea = (mode == 0) ? 0u : static_cast<u64>(imm);
+    bool writeback = (mode != 2);
+
+    if (is_load) {
+        u64 sign = (opc == 1) ? 1u : 0u;
+        bb->Append(cache.builder->CreateInstruction(
+            Opcode::LoadPairMem, Type::Void(),
+            {cache.Reg(rt), cache.Reg(rt2), cache.Reg(rn), cache.Imm(ea),
+             cache.Imm(width), cache.Imm(sign)}));
+    } else {
+        bb->Append(cache.builder->CreateInstruction(
+            Opcode::StorePairMem, Type::Void(),
+            {cache.Reg(rt), cache.Reg(rt2), cache.Reg(rn), cache.Imm(ea),
+             cache.Imm(width)}));
+    }
+    if (writeback) {
+        // Add writes into the register from operand 0, which is exactly the
+        // writeback semantics: Rn = Rn + imm7 * width.
+        bb->Append(cache.builder->CreateAdd(
+            cache.Reg(rn),
+            cache.builder->CreateConstant(static_cast<u64>(imm), Type::U64())));
+    }
     return true;
 }
+
+// (STP is handled by DecodePair: the pair encodings share one table entry.)
 
 bool DecodeMadd(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock* bb) {
     // MADD Xd, Xn, Xm, Xa: Rd = Rn * Rm + Ra.
@@ -563,19 +577,31 @@ bool DecodeFmulS(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock*
     return true;
 }
 
-bool DecodeLdrS(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock* bb) {
-    // LDR St, [Xn, #imm]: canonical single-instruction form (offset 0) mirrors
-    // the integer DecodeLdr modeling; access size is 4 bytes.
-    u32 rn = ExtractBits(word, 9, 5);
-    bb->Append(cache.builder->CreateLoad(cache.Reg(rn), Type::F32()));
-    return true;
-}
-
-bool DecodeStrS(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock* bb) {
-    // STR St, [Xn, #imm]: Store(Xn base, FReg(rt) value).
+// LDR/STR (immediate, unsigned offset) of a scalar FP register. The previous
+// decoders ignored Rt and imm12 and loaded into the base register, so
+// `ldr s0, [x1, #4]` wrote the float into v1. The destination is Vt and the
+// offset is imm12 scaled by the access size (4 for S, 8 for D); the FP flag in
+// LoadMem/StoreMem selects the V register bank in codegen.
+bool DecodeFpLoadStore(u32 word, u64 /*guest_addr*/, ConstantCache& cache,
+                       BasicBlock* bb) {
+    u32 size = ExtractBits(word, 31, 30);
+    u32 is_load = ExtractBits(word, 22, 22);
+    u32 imm12 = ExtractBits(word, 21, 10);
     u32 rn = ExtractBits(word, 9, 5);
     u32 rt = ExtractBits(word, 4, 0);
-    bb->Append(cache.builder->CreateStore(cache.Reg(rn), cache.FReg(rt)));
+    u64 width = (size == 3) ? 8u : 4u;
+    u64 offset = static_cast<u64>(imm12) * width;
+    if (is_load) {
+        bb->Append(cache.builder->CreateInstruction(
+            Opcode::LoadMem, Type::Void(),
+            {cache.Reg(rt), cache.Reg(rn), cache.Imm(offset), cache.Imm(width),
+             cache.Imm(0), cache.Imm(1)}));
+    } else {
+        bb->Append(cache.builder->CreateInstruction(
+            Opcode::StoreMem, Type::Void(),
+            {cache.Reg(rt), cache.Reg(rn), cache.Imm(offset), cache.Imm(width),
+             cache.Imm(1)}));
+    }
     return true;
 }
 
@@ -633,22 +659,8 @@ bool DecodeFdivD(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock*
     return true;
 }
 
-bool DecodeLdrD(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock* bb) {
-    // LDR Dt, [Xn, #imm]: canonical single-instruction form (offset 0);
-    // access size is 8 bytes. imm12 (bits 21:10) scales by 8; ignored here,
-    // mirroring the S/integer canonical Load modeling.
-    u32 rn = ExtractBits(word, 9, 5);
-    bb->Append(cache.builder->CreateLoad(cache.Reg(rn), Type::F64()));
-    return true;
-}
-
-bool DecodeStrD(u32 word, u64 /*guest_addr*/, ConstantCache& cache, BasicBlock* bb) {
-    // STR Dt, [Xn, #imm]: Store(Xn base, DReg(rt) value).
-    u32 rn = ExtractBits(word, 9, 5);
-    u32 rt = ExtractBits(word, 4, 0);
-    bb->Append(cache.builder->CreateStore(cache.Reg(rn), cache.DReg(rt)));
-    return true;
-}
+// (The scalar D forms share DecodeFpLoadStore with the S forms: size 11 selects
+// an 8-byte access.)
 
 // ---- RC-FP-002: FP compare and conversions ----
 
@@ -987,12 +999,9 @@ const DecodeEntry kDecodeTable[] = {
     // Non-alias SUBS (Rd != 31), imm6=0: Sub lowering, no flags.
     {0xFFE0FFFFu, 0xEB000000u, Opcode::Sub,        DecodeSubsReg},
     {0xFFE0FFFFu, 0x6B000000u, Opcode::Sub,        DecodeSubsReg},
-    // LDR/STR S unsigned offset (32-bit FP, bits 31-22 fixed).
-    {0xFFC00000u, 0xBD400000u, Opcode::Load,       DecodeLdrS},
-    {0xFFC00000u, 0xBD000000u, Opcode::Store,      DecodeStrS},
-    // RC-FP-003: LDR/STR D unsigned offset (size bits31:30=11, 8-byte access).
-    {0xFFC00000u, 0xFD400000u, Opcode::Load,       DecodeLdrD},
-    {0xFFC00000u, 0xFD000000u, Opcode::Store,      DecodeStrD},
+    // LDR/STR scalar FP (V=1, bits 29-24 = 111101): one entry covers S and D
+    // for both directions; size bits 31-30 pick the 4- or 8-byte access.
+    {0x3F000000u, 0x3D000000u, Opcode::LoadMem,    DecodeFpLoadStore},
     // RC-FP-002: FCVTZS Wd/Xd,Sn and SCVTF Sd,Wn/Xn. Fixed bits 31-10; the
     // sf bit is carried in the value, so both widths get an entry each.
     {0xFFFFFC00u, 0x9E780000u, Opcode::Convert,    DecodeFcvtzs},
@@ -1006,9 +1015,12 @@ const DecodeEntry kDecodeTable[] = {
     {0xFFFFFC00u, 0x1E230000u, Opcode::Convert,    DecodeScvtf},
     // SVC #imm16: 1101 0100 000 imm16 00001. Distinct mask, no alias.
     {0xFFE0001Fu, 0xD4000001u, Opcode::Svc,        DecodeSvc},
-    // LDP/STP 64-bit (bits 31-22 fixed) — placed before LDR/STR to avoid alias.
-    {0xFFC00000u, 0xE8400000u, Opcode::Load,       DecodeLdp},
-    {0xFFC00000u, 0xE8000000u, Opcode::Store,      DecodeStp},
+    // LDP/STP/LDPSW: one shared decode, three addressing modes, each pinned by
+    // bits 29-23 so the logical-register group (ORR has bits 25:23 = 101) is
+    // not swallowed. Post-index = 000, offset = 010, pre-index = 011.
+    {0x3F800000u, 0x28000000u, Opcode::LoadPairMem, DecodePair},
+    {0x3F800000u, 0x29000000u, Opcode::LoadPairMem, DecodePair},
+    {0x3F800000u, 0x2B000000u, Opcode::LoadPairMem, DecodePair},
     {0xFF000010u, 0x54000000u, Opcode::CondBranch, DecodeBCond},
     // MADD/MSUB (bits 30-21 + bit 15 fixed) — before the 0x7F800000 group.
     {0x7FE08000u, 0x1B000000u, Opcode::Mul,        DecodeMadd},
