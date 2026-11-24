@@ -5,7 +5,7 @@
       "blocks": [
         {
           "instructions": [
-            {"id": 2, "opcode": "CondBranch", "type": "Void", "operands": [{"id": 1, "kind": "constant", "type": "U64", "value": 0}]}
+            {"id": 4, "opcode": "CompareBranch", "type": "Void", "operands": [{"id": 1, "kind": "constant", "type": "U64", "value": 0}, {"id": 2, "kind": "constant", "type": "U32", "value": 0}, {"id": 2, "kind": "constant", "type": "U32", "value": 0}, {"id": 5, "kind": "constant", "type": "U64", "value": 0}]}
           ]
         }
       ]

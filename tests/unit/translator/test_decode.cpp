@@ -194,14 +194,15 @@ TEST(Translate, BranchConditional) {
 
 TEST(Translate, CompareBranchZero) {
     sr::common::u8 code[4];
-    WordToBytes(0x34000000u, code); // CBZ x0, #0
-    ExpectOneInstr(code, Opcode::CondBranch, 1u);
+    WordToBytes(0x34000000u, code); // CBZ W0, #0
+    // CompareBranch {Rt, branch-if-nonzero, is-64-bit, target}.
+    ExpectOneInstr(code, Opcode::CompareBranch, 4u);
 }
 
 TEST(Translate, CompareBranchNonZero) {
     sr::common::u8 code[4];
-    WordToBytes(0x35000000u, code); // CBNZ x0, #0
-    ExpectOneInstr(code, Opcode::CondBranch, 1u);
+    WordToBytes(0x35000000u, code); // CBNZ W0, #0
+    ExpectOneInstr(code, Opcode::CompareBranch, 4u);
 }
 
 TEST(Translate, Ret) {
@@ -1002,4 +1003,37 @@ TEST(Translate, TbnzUpperBitIndexUsesB5) {
     ASSERT_EQ(instrs.size(), 1u);
     EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[0])->value(), 3u);
     EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[1])->value(), 40u);
+}
+
+// ---- CBZ / CBNZ: compare with zero and branch ---------------------------
+//
+// One CompareBranch node with operands {Rt, branch-if-nonzero, is-64-bit,
+// target ordinal}; previously these decoders dropped the target entirely.
+
+TEST(Translate, CbzEmitsCompareBranch) {
+    sr::common::u8 code[4];
+    WordToBytes(0x34000000u, code); // cbz w0, .+0
+    ExpectOneInstr(code, Opcode::CompareBranch, 4u);
+}
+
+TEST(Translate, CbzWordFormIs32Bit) {
+    sr::common::u8 code[4];
+    WordToBytes(0x34000000u, code); // cbz w0, .+0
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs.size(), 1u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[0])->value(), 0u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[1])->value(), 0u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[2])->value(), 0u);
+}
+
+TEST(Translate, CbnzXFormSetsNonzeroAnd64Bit) {
+    sr::common::u8 code[4];
+    WordToBytes(0xB5000001u, code); // cbnz x1, .+0
+    auto module = TranslateOne(code);
+    const auto& instrs = module->functions()[0]->blocks()[0]->instructions();
+    ASSERT_EQ(instrs.size(), 1u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[0])->value(), 1u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[1])->value(), 1u);
+    EXPECT_EQ(dynamic_cast<Constant*>(instrs[0]->operands()[2])->value(), 1u);
 }

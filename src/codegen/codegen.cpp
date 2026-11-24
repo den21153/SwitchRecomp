@@ -755,6 +755,32 @@ void LowerInstruction(const ir::Instruction* i, std::string& out) {
             out.push_back(';');
             return;
         }
+        case Opcode::CompareBranch: {
+            // CBZ/CBNZ form: operands {Rt register constant, branch-if-nonzero
+            // (0/1), is-64-bit (0/1), target IR ordinal}. The zero test is
+            // width-masked, so a CBZ on a W register looks at bits 31:0 only.
+            const auto& cb_ops = i->operands();
+            const u64 rt = RegIndex(op0);
+            u64 nonzero = 1, is64 = 1, target = 0;
+            if (cb_ops.size() == 4) {
+                if (auto* c = dynamic_cast<const ir::Constant*>(cb_ops[1]))
+                    nonzero = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(cb_ops[2]))
+                    is64 = c->value();
+                if (auto* c = dynamic_cast<const ir::Constant*>(cb_ops[3]))
+                    target = c->value();
+            }
+            out.append("if ((ctx->x[");
+            AppendDec(out, rt);
+            out.append("] & ");
+            AppendDec(out, is64 ? ~static_cast<u64>(0) : 0xFFFFFFFFull);
+            out.append("ull) ");
+            out.append(nonzero ? "!=" : "==");
+            out.append(" 0) goto glabel");
+            AppendDec(out, target);
+            out.push_back(';');
+            return;
+        }
         case Opcode::Return:
             out.append("return;");
             return;
